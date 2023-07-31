@@ -1,63 +1,149 @@
 import SwiftUI
 import AVFoundation
+import Photos
 import PhotosUI
 
+enum MediaType {
+    case camera, video
+}
+
+enum FlashStates {
+    case auto
+    case on
+    case off
+}
+
 struct ContentView: View {
+    @State private var isCameraOpen: Bool = false
+    @State var mediaType: MediaType = .camera
     var body: some View {
-        CameraView()
-            .edgesIgnoringSafeArea(.all)
+        VStack{
+            Menu {
+                Button {
+                    mediaType = .camera
+                    isCameraOpen.toggle()
+                    
+                } label: {
+                    Image(systemName: "camera")
+                        .foregroundColor(.blue)
+                }
+                
+                Button(action: {
+                    mediaType = .video
+                    isCameraOpen.toggle()
+                }) {
+                    Image(systemName: "video")
+                        .foregroundColor(.red)
+                }
+
+            } label: {
+                Text("Add Image")
+            }
+
+        }
+        .sheet(isPresented: $isCameraOpen) {
+            RecordingView(mediaType: $mediaType)
+        }
     }
 }
 
-struct CameraView: View {
+struct RecordingView: View {
+    
+    @Binding var mediaType: MediaType
+    
     @State private var isRecording = false
     @State private var isTakingPhoto = false
     @State private var session: AVCaptureSession?
     @State private var latestVideoThumbnail: UIImage? // To store the latest video thumbnail
-    private var videoRecorder = VideoRecorder()
-    private var photoCapture = PhotoCapture()
+    var videoRecorder = VideoRecorder()
+    var photoCapture = PhotoCapture()
     @State private var avatarItem: PhotosPickerItem?
     @State private var avatarImage: Image?
     @State private var showImagePicker:Bool = false
-    
+    @State private var isFlashOn:Bool = false
+    @State private var isFlashMenuOpen = false
+    @State private var flashCurrentState:FlashStates = .auto
+    @State private var currentCameraPosition: AVCaptureDevice.Position = .back
     
     
     var body: some View {
         ZStack {
             // Display camera preview layer
             CameraViewController(session: $session)
-
             VStack {
                 Spacer()
                 HStack {
-                    Button(action: {
-                        isRecording = false
-                        videoRecorder.stopRecording()
-                        isTakingPhoto = true
-                    }) {
-                        Image(systemName: "camera")
-                            .font(.system(size: 80))
-                            .foregroundColor(.blue)
-                    }
-                    .padding(.horizontal, 30)
-
-                    Button(action: {
-                        isTakingPhoto = false
-                        isRecording.toggle()
-                        if isRecording {
-                            videoRecorder.checkPermissionsAndStartRecording()
-                        } else {
+                    if mediaType == .camera {
+                        Button {
+                            isRecording = false
                             videoRecorder.stopRecording()
+                            isTakingPhoto.toggle()
+                        } label: {
+                            ZStack {
+                                Circle()
+                                    .strokeBorder(.white, lineWidth: 3)
+                                    .frame(width: 62, height: 62)
+                                Circle()
+                                    .fill(.white)
+                                    .frame(width: 50, height: 50)
+                            }
                         }
-                    }) {
-                        
-                        Image(systemName: isRecording ? "stop.circle" : "circle.fill")
-                            .font(.system(size: 80))
-                            .foregroundColor(.red)
+                    }else{
+                        Button(action: {
+                            isTakingPhoto = false
+                            isRecording.toggle()
+                            if isRecording {
+                                videoRecorder.checkPermissionsAndStartRecording()
+                            } else {
+                                videoRecorder.stopRecording()
+                            }
+                        }) {
+                            
+                            Image(systemName: isRecording ? "stop.circle" : "circle.fill")
+                                .font(.system(size: 80))
+                                .foregroundColor(.red)
+                        }
+                    }
+                    
+                    Button {
+                        switchCamera()
+                    } label: {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 40))
                     }
                     .padding(.horizontal, 30)
+                    
+                    VStack {
+                        // Your camera view or other content here
 
-                    PhotosPicker(selection: $avatarItem) {
+                        // Button to show/hide the flash menu
+                        Button(action: {
+                            withAnimation {
+                                isFlashMenuOpen.toggle()
+                            }
+                        }) {
+                            switch flashCurrentState {
+                            case .auto:
+                                Image(systemName: "bolt.fill")
+                                    .font(.system(size: 40))
+                                    .foregroundColor(.white)
+                            case .on:
+                                Image(systemName: "bolt.fill")
+                                    .font(.system(size: 40))
+                                    .foregroundColor(.yellow)
+                            case .off:
+                                Image(systemName: "bolt.slash.fill")
+                                    .font(.system(size: 40))
+                                    .foregroundColor(.white)
+                            }
+                        }                    }
+                    .flashMenu(isVisible: $isFlashMenuOpen,selectedOption: $flashCurrentState)
+                    .padding(20)
+                    .onChange(of: flashCurrentState) { _ in
+                        flashModeToggle()
+                    }
+                    
+                    PhotoPickerView(photoPickerItem: $avatarItem) {
                         if let latestVideoThumbnail = latestVideoThumbnail {
                                                     Image(uiImage: latestVideoThumbnail)
                                                         .resizable()
@@ -68,21 +154,30 @@ struct CameraView: View {
                                                         .font(.system(size: 80))
                                                         .foregroundColor(.green)
                                                 }
-                      
+
                     }
-                    .padding(.horizontal, 30)
+                   // .padding(.horizontal, 30)
                 }
                 .padding(.bottom, 30)
             }
         }
         .onAppear {
-            setUpCamera()
+            DispatchQueue.main.async {
+                setUpCamera()
+            }
+            
             getLatestThumbnail()
+            videoRecorder.closureVideoSave = { _ in
+                getLatestThumbnail()
+            }
+            photoCapture.closurePhotoSave = { _ in
+                getLatestThumbnail()
+            }
         }
         .edgesIgnoringSafeArea(.all)
         .onChange(of: isTakingPhoto) { newValue in
             if newValue {
-                photoCapture.takePhoto()
+                photoCapture.takePhoto(flashMode: flashCurrentState)
             }
         }
         .onChange(of: avatarItem) { _ in
@@ -97,6 +192,9 @@ struct CameraView: View {
                         print("Failed")
                     }
                 }
+        .onChange(of: isFlashOn, perform: { newValue in
+            flashModeToggle()
+        })
         .sheet(isPresented: $showImagePicker) {
             VStack {
                         //PhotosPicker("Select avatar", selection: $avatarItem, matching: .videos)
@@ -115,7 +213,12 @@ struct CameraView: View {
     private func getLatestThumbnail() {
             let fetchOptions = PHFetchOptions()
             fetchOptions.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        if mediaType == .camera {
+            fetchOptions.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+        }else{
             fetchOptions.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.video.rawValue)
+        }
+            
 
             let fetchResult = PHAsset.fetchAssets(with: fetchOptions)
             if let latestVideo = fetchResult.firstObject {
@@ -131,35 +234,114 @@ struct CameraView: View {
         }
     
     
+    private func flashModeToggle(){
+        settingDevice()
+        session?.commitConfiguration()
+    }
+        
     
+    private func settingDevice(){
+        if let sessionTemp = session?.inputs{
+            for input in sessionTemp {
+                session?.removeInput(input)
+            }
+        }
+        
+        let discoverySession = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera],
+            mediaType: .video,
+            position: .unspecified
+        )
+
+        guard let device = discoverySession.devices.first(where: { $0.position == currentCameraPosition }) else {
+            print("Failed to access the specified camera.")
+            return
+        }
+        
+        
+        
+        if device.hasTorch && device.isTorchModeSupported(.on) {
+            do {
+                try device.lockForConfiguration()
+            switch flashCurrentState {
+            case .auto:
+                device.torchMode = .auto
+            case .on:
+                device.torchMode = .on
+            case .off:
+                device.torchMode = .off
+            }
+            device.unlockForConfiguration()
+                
+            }catch{
+                
+            }
+                
+            }
+        
+        
+        
+        
+        
+        guard let audioDevice = AVCaptureDevice.default(for: .audio) else {
+            print("Failed to access audio device.")
+            return
+        }
+      
+        do {
+            let videoInput = try AVCaptureDeviceInput(device: device)
+            let audioInput = try AVCaptureDeviceInput(device: audioDevice)
+
+            session?.beginConfiguration()
+
+            if ((session?.canAddInput(videoInput)) != nil) {
+                session?.addInput(videoInput)
+            }
+            if ((session?.canAddInput(audioInput)) != nil) {
+                session?.addInput(audioInput)
+            }
+        } catch {
+            print("werrr")
+        }
+        
+        
+        
+    }
+    
+    
+    private func switchCamera() {
+            // Determine the current camera position
+            let cameraPosition = session?.inputs.first { input in
+                if let input = input as? AVCaptureDeviceInput {
+                    return input.device.position == .back || input.device.position == .front
+                }
+                return false
+            } as? AVCaptureDeviceInput
+
+            // Get the opposite camera position
+        currentCameraPosition = (cameraPosition?.device.position == .back) ? .front : .back
+        settingDevice()
+        session?.commitConfiguration()
+        }
+    
+    
+
+    
+    func stopSession() {
+        if ((session?.isRunning) != nil) {
+            DispatchQueue.global().async {
+                self.session?.stopRunning()
+            }
+        }
+    }
 
     private func setUpCamera() {
         let session = AVCaptureSession()
         self.session = session
 
         DispatchQueue.global(qos: .userInitiated).async {
-            guard let device = AVCaptureDevice.default(for: .video) else {
-                print("Failed to access video device.")
-                return
-            }
-            guard let audioDevice = AVCaptureDevice.default(for: .audio) else {
-                print("Failed to access audio device.")
-                return
-            }
-
             do {
-                let videoInput = try AVCaptureDeviceInput(device: device)
-                let audioInput = try AVCaptureDeviceInput(device: audioDevice)
-
-                session.beginConfiguration()
-
-                if session.canAddInput(videoInput) {
-                    session.addInput(videoInput)
-                }
-                if session.canAddInput(audioInput) {
-                    session.addInput(audioInput)
-                }
-
+                settingDevice()
                 if session.canAddOutput(videoRecorder.videoOutput) {
                     session.addOutput(videoRecorder.videoOutput)
                 }
@@ -170,14 +352,12 @@ struct CameraView: View {
                 if session.canAddOutput(photoCapture.photoOutput) {
                     session.addOutput(photoCapture.photoOutput)
                 }
-
-                session.commitConfiguration()
-
                 session.sessionPreset = .high // Set session preset to high quality
 
-                DispatchQueue.main.async {
+                DispatchQueue.global().async {
                     session.startRunning()
                 }
+                session.commitConfiguration()
             } catch {
                 print("Error setting up camera: \(error.localizedDescription)")
             }
@@ -209,13 +389,22 @@ class CameraPreviewController: UIViewController {
                 previewLayer.videoGravity = .resizeAspectFill
                 previewLayer.frame = view.bounds
                 view.layer.addSublayer(previewLayer)
+                //self.view.layer.sublayers?.forEach { $0.removeFromSuperlayer() }
+                
             }
         }
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .black // Set background color to black
+        view.backgroundColor = .black
+
+        // Set background color to black
+    }
+    
+    
+    override func viewWillAppear(_ animated: Bool) {
+        
     }
 
     override func viewDidLayoutSubviews() {
@@ -226,11 +415,17 @@ class CameraPreviewController: UIViewController {
     }
 }
 
+
+
+
 class VideoRecorder: NSObject {
     internal var videoOutput: AVCaptureMovieFileOutput // Change 'private' to 'internal'
     internal var audioOutput: AVCaptureAudioDataOutput // Change 'private' to 'internal'
     private var outputFileURL: URL?
 
+    var closureVideoSave:((Bool)->())?
+    
+    
     override init() {
          videoOutput = AVCaptureMovieFileOutput()
          audioOutput = AVCaptureAudioDataOutput()
@@ -295,8 +490,14 @@ class VideoRecorder: NSObject {
                  PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: outputFileURL)
              }) { success, error in
                  if success {
+                     if let closureVideoSave = self.closureVideoSave{
+                         closureVideoSave(true)
+                     }
                      print("Video saved to gallery.")
                  } else if let error = error {
+                     if let closureVideoSave = self.closureVideoSave{
+                         closureVideoSave(false)
+                     }
                      print("Error saving video to gallery: \(error.localizedDescription)")
                  }
              }
@@ -307,16 +508,20 @@ class VideoRecorder: NSObject {
 class PhotoCapture: NSObject {
     internal var photoOutput: AVCapturePhotoOutput // Change 'private' to 'internal'
     private var photoSettings: AVCapturePhotoSettings?
+    var closurePhotoSave:((Bool)->())?
 
     override init() {
         photoOutput = AVCapturePhotoOutput()
     }
 
-    func takePhoto() {
+    func takePhoto(flashMode:FlashStates = .auto) {
         guard let connection = photoOutput.connection(with: .video) else {
             print("Cannot access video connection.")
             return
         }
+        
+        
+        
         guard connection.isVideoOrientationSupported else {
             print("Video orientation is not supported.")
             return
@@ -325,7 +530,17 @@ class PhotoCapture: NSObject {
         connection.videoOrientation = .portrait
 
         let photoSettings = AVCapturePhotoSettings()
+        switch flashMode {
+        case .auto:
+            photoSettings.flashMode = .auto
+        case .on:
+            photoSettings.flashMode = .on
+        case .off:
+            photoSettings.flashMode = .off
+        }
+
         self.photoSettings = photoSettings
+        
 
         DispatchQueue.main.async {
             self.photoOutput.capturePhoto(with: photoSettings, delegate: self)
@@ -349,11 +564,78 @@ extension PhotoCapture: AVCapturePhotoCaptureDelegate {
                 creationRequest.addResource(with: .photo, data: imageData, options: nil)
             }) { success, error in
                 if success {
+                    if let closurePhotoSave = self.closurePhotoSave{
+                        closurePhotoSave(true)
+                    }
                     print("Photo saved to gallery.")
                 } else if let error = error {
+                    if let closurePhotoSave = self.closurePhotoSave{
+                        closurePhotoSave(false)
+                    }
                     print("Error saving photo to gallery: \(error.localizedDescription)")
                 }
             }
+        }
+    }
+}
+
+
+struct FlashMenuModifier: ViewModifier {
+    @Binding var isVisible: Bool
+    @Binding var selectedOption: FlashStates
+
+    func body(content: Content) -> some View {
+        ZStack {
+            content
+
+            if isVisible {
+                VStack(spacing: 10) {
+                    Button("Auto") {
+                        // Handle the flash mode change to Auto
+                        withAnimation {
+                            selectedOption = .auto
+                            isVisible.toggle()
+                        }
+                    }
+                    Button("On") {
+                        // Handle the flash mode change to On
+                        withAnimation {
+                            selectedOption = .on
+                            isVisible.toggle()
+                        }
+                    }
+                    Button("Off") {
+                        // Handle the flash mode change to Off
+                        withAnimation {
+                            selectedOption = .off
+                            isVisible.toggle()
+                        }
+                    }
+                }
+                .padding()
+                .background(Color.black)
+                .foregroundColor(.white)
+                .cornerRadius(10)
+                .shadow(radius: 5)
+                .transition(.scale) // Apply scale animation to menu expansion
+            }
+        }
+    }
+}
+
+extension View {
+    func flashMenu(isVisible: Binding<Bool>,selectedOption: Binding<FlashStates>) -> some View {
+        self.modifier(FlashMenuModifier(isVisible: isVisible, selectedOption: selectedOption))
+    }
+}
+
+
+struct PhotoPickerView: View {
+    @Binding var photoPickerItem: PhotosPickerItem
+    let completion: () -> ()
+    var body: some View {
+        PhotosPicker(selection: $photoPickerItem, matching: mediaType == .camera ? .images : .videos) {
+            completion()
         }
     }
 }
